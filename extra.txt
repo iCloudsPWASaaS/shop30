@@ -1,0 +1,277 @@
+"ext-http": "*", has been removed
+--------------------
+/app/app/Jobs/DownloadProductImage.php
+/app/app/Console/Commands/DownloadProductImages.php
+
+5035230100041
+6009605840343
+
+QUEUE_CONNECTION=database -> from sync
+
+note - media id after 33 product image starts
+
+step - 1
+cat > /app/app/Jobs/DownloadProductImage.php << 'EOF'
+<?php
+
+namespace App\Jobs;
+
+use App\Models\Product;
+use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+
+class DownloadProductImage implements ShouldQueue
+{
+    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+
+    public int $tries   = 3;
+    public int $backoff = 15;
+
+    public function __construct(public Product $product) {}
+
+    public function handle(): void
+    {
+        if ($this->product->hasMedia('product')) {
+            Log::info("Skip #{$this->product->id} - already has image");
+            return;
+        }
+
+        $imageUrl = $this->fetchImage();
+
+        if (!$imageUrl) {
+            Log::warning("No image found for #{$this->product->id} [{$this->product->name}]");
+            return;
+        }
+
+        $mediaName = Str::slug($this->product->name, '_');
+        $extension = $this->resolveExtension($imageUrl);
+
+        $this->product
+            ->addMediaFromUrl($imageUrl)
+            ->usingName($mediaName)
+            ->usingFileName("{$mediaName}.{$extension}")
+            ->toMediaCollection('product');
+
+        Log::info("✅ #{$this->product->id} [{$this->product->name}] → {$mediaName}.{$extension}");
+    }
+
+    private function fetchImage(): ?string
+    {
+        if ($url = $this->tryOpenFoodFacts()) return $url;
+        if ($url = $this->tryOpenBeautyFacts()) return $url;
+        if ($url = $this->tryDuckDuckGo()) return $url;
+        return null;
+    }
+
+    private function tryOpenFoodFacts(): ?string
+    {
+        try {
+            $response = Http::timeout(10)
+                ->withoutVerifying()
+                ->withHeaders(['User-Agent' => 'ShopApp/1.0'])
+                ->get("https://world.openfoodfacts.org/api/v0/product/{$this->product->sku}.json");
+
+            if ($response->failed()) return null;
+            if (($response->json('status') ?? 0) !== 1) return null;
+
+            return $response->json('product.image_front_url')
+                ?? $response->json('product.image_url');
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    private function tryOpenBeautyFacts(): ?string
+    {
+        try {
+            $response = Http::timeout(10)
+                ->withoutVerifying()
+                ->withHeaders(['User-Agent' => 'ShopApp/1.0'])
+                ->get("https://world.openbeautyfacts.org/api/v0/product/{$this->product->sku}.json");
+
+            if ($response->failed()) return null;
+            if (($response->json('status') ?? 0) !== 1) return null;
+
+            return $response->json('product.image_front_url')
+                ?? $response->json('product.image_url');
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    private function tryDuckDuckGo(): ?string
+    {
+        try {
+            $response = Http::timeout(10)
+                ->withoutVerifying()
+                ->withHeaders([
+                    'User-Agent' => 'Mozilla/5.0 (compatible; ShopBot/1.0)',
+                ])
+                ->get('https://api.duckduckgo.com/', [
+                    'q'       => $this->product->name . ' product',
+                    'iax'     => 'images',
+                    'ia'      => 'images',
+                    'format'  => 'json',
+                    'no_html' => 1,
+                ]);
+
+            if ($response->failed()) return null;
+
+            $image = $response->json('Image');
+            if (!empty($image)) return 'https://duckduckgo.com' . $image;
+
+            return null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    private function resolveExtension(string $url): string
+    {
+        $ext = strtolower(pathinfo(parse_url($url, PHP_URL_PATH), PATHINFO_EXTENSION));
+        $ext = explode('?', $ext)[0];
+        return in_array($ext, ['jpg', 'jpeg', 'png', 'webp']) ? $ext : 'jpg';
+    }
+
+    public function failed(\Throwable $e): void
+    {
+        Log::error("❌ Failed #{$this->product->id} [{$this->product->name}]: {$e->getMessage()}");
+    }
+}
+EOF
+
+step - 2
+cat > /app/app/Console/Commands/DownloadProductImages.php << 'EOF'
+<?php
+
+namespace App\Console\Commands;
+
+use App\Jobs\DownloadProductImage;
+use App\Models\Product;
+use Illuminate\Console\Command;
+
+class DownloadProductImages extends Command
+{
+    protected $signature   = 'products:download-images';
+    protected $description = 'Dispatch image download jobs for all products without images';
+
+    public function handle(): void
+    {
+        $this->info('Command started...');
+
+        $total = Product::whereDoesntHave('media')
+            ->whereNotNull('sku')
+            ->count();
+
+        if ($total === 0) {
+            $this->info('All products already have images!');
+            return;
+        }
+
+        $this->info("Found {$total} products without images. Dispatching jobs...");
+
+        $bar = $this->output->createProgressBar($total);
+        $bar->start();
+
+        Product::whereDoesntHave('media')
+            ->whereNotNull('sku')
+            ->chunkById(100, function ($products) use ($bar) {
+                foreach ($products as $product) {
+                    DownloadProductImage::dispatch($product)->onQueue('images');
+                    $bar->advance();
+                }
+            });
+
+        $bar->finish();
+        $this->newLine(2);
+        $this->info('All jobs dispatched!');
+        $this->info('Now run: php artisan queue:work --queue=images --tries=3 --sleep=1 --stop-when-empty');
+    }
+}
+EOF
+
+step - 3
+php artisan optimize:clear
+php artisan products:download-images
+php artisan queue:work --queue=images --tries=3 --sleep=1 --stop-when-empty
+php artisan queue:work --queue=default --tries=3 --sleep=1 --stop-when-empty
+
+
+php artisan optimize:clear
+php artisan products:download-images
+php artisan queue:work --queue=images --tries=3 --sleep=1 --stop-when-empty &
+php artisan queue:work --queue=images --tries=3 --sleep=1 --stop-when-empty &
+php artisan queue:work --queue=images --tries=3 --sleep=1 --stop-when-empty &
+php artisan queue:work --queue=images --tries=3 --sleep=1 --stop-when-empty &
+php artisan queue:work --queue=images --tries=3 --sleep=1 --stop-when-empty &
+php artisan queue:work --queue=default --tries=3 --sleep=1 --stop-when-empty &
+------------------------
+
+pagination -
+paginate: 0 -> 1
+
+
+modified -
+F:\MyProjects2025\shopking30\main\resources\js\components\admin\pos\ProductListComponent.vue
+F:\MyProjects2025\shopking30\main\resources\js\components\admin\pos\PosComponent.vue
+extra category swiper
+from pos search -
+<form class="w-full mb-4" @submit.prevent="search">
+      <div class="form-row">
+        <div class="form-col-12 sm:form-col-6"
+          :class="checkoutProps.form.category || checkoutProps.form.brand ? 'xl:form-col-4' : 'xl:form-col-4'">
+          <div class="w-full flex items-center h-10 px-3 rounded-md border border-[#EFF0F6] bg-white">
+            <button type="submit" class="lab-line-search ltr:mr-2 rtl:ml-2"></button>
+            <input type="search" v-model="props.search.name" :placeholder="$t('label.search_here')" class="w-full">
+            <button @click="resetName" type="button" v-if="props.search.name"
+              class="text-sm text-red-500 fa-regular fa-circle-xmark"></button>
+          </div>
+        </div>
+
+        <div class="form-col-12 sm:form-col-6"
+          :class="checkoutProps.form.category || checkoutProps.form.brand ? 'xl:form-col-3' : 'xl:form-col-4'">
+          <div class="db-field w-full">
+            <vue-select v-model="checkoutProps.form.category"
+              class="db-field-control appearance-none cursor-pointer f-b-custom-select" id="customer"
+              :options="categories" label-by="option" value-by="id" :closeOnSelect="true" :searchable="true"
+              :clearOnClose="true" :placeholder="$t('label.select_category')"
+              :search-placeholder="$t('label.search_category')" @update:modelValue="setCategory($event)" />
+          </div>
+        </div>
+
+        <div class="form-col-12 sm:form-col-6"
+          :class="checkoutProps.form.category || checkoutProps.form.brand ? 'xl:form-col-3' : 'xl:form-col-4'">
+          <div class="db-field w-full">
+            <vue-select v-model="checkoutProps.form.brand" class="db-field-control appearance-none cursor-pointer"
+              id="customer" :options="brands" label-by="name" value-by="id" :closeOnSelect="true" :searchable="true"
+              :clearOnClose="true" :placeholder="$t('label.select_brand')"
+              :search-placeholder="$t('label.search_brand')" @update:modelValue="setBrand($event)" />
+          </div>
+        </div>
+
+        <div class="form-col-12 sm:form-col-6 xl:form-col-2"
+          v-if="checkoutProps.form.category || checkoutProps.form.brand">
+          <button class="db-btn-outline h-[38px] w-full flex-shrink-0 !text-[#FB4E4E] !bg-white !border-[#FB4E4E]"
+            @click="reset">
+            <i class="lab lab-line-reset"></i>
+            <span>{{ $t("button.reset") }}</span>
+          </button>
+        </div>
+      </div>
+
+    </form>
+
+
+F:\MyProjects2025\shopking30\main\resources\js\components\admin\pos\PosCustomerComponent.vue,
+F:\MyProjects2025\shopking30\main\resources\js\components\admin\pos\PaymentComponent.vue -> converted from modal to section
+
+F:\MyProjects2025\shopking30\main\resources\js\components\admin\settings\PrinterSettingComponent.vue
+
+F:\MyProjects2025\shopking30\main\resources\js\components\admin\posOrders\PosOrderListComponent.vue,
+F:\MyProjects2025\shopking30\main\resources\js\components\admin\onlineOrders\OnlineOrderListComponent.vue -> user manual delete giving error
