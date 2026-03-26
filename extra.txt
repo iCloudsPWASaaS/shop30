@@ -284,3 +284,8 @@ git add .
 git commit -m "fresh clean commit"
 git remote add origin https://github.com/iCloudsPWASaaS/shop30.git
 git push -u origin main --force
+
+
+git rm -r --cached storage
+git add storage/app/public
+git status
