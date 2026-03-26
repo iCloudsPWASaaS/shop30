@@ -27,7 +27,7 @@ storage/media-library
 */storage/media-library
 docker-compose.yml
 
-!storage/
-!storage/app/
-!storage/app/public/
-!storage/app/public/**
+/storage/*
+!/storage/app/
+!/storage/app/public/
+!/storage/app/public/**
