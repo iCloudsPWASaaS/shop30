@@ -275,3 +275,12 @@ F:\MyProjects2025\shopking30\main\resources\js\components\admin\settings\Printer
 
 F:\MyProjects2025\shopking30\main\resources\js\components\admin\posOrders\PosOrderListComponent.vue,
 F:\MyProjects2025\shopking30\main\resources\js\components\admin\onlineOrders\OnlineOrderListComponent.vue -> user manual delete giving error
+
+
+----------------------github
+Remove-Item -Recurse -Force .git
+git init
+git add .
+git commit -m "fresh clean commit"
+git remote add origin https://github.com/iCloudsPWASaaS/shop30.git
+git push -u origin main --force

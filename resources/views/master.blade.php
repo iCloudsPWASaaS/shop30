@@ -58,7 +58,9 @@
     @endif
 
     <script>
-        const APP_URL = "{{ env('VITE_HOST') }}";
+        //const APP_URL = "{{ env('VITE_HOST') }}";
+        window.APP_URL = "{{ rtrim(request()->schemeAndHttpHost(), '/') }}"; //extra
+        
         const APP_DEMO = "{{ env('VITE_DEMO') }}";
         const APP_KEY = "{{ env('VITE_API_KEY') }}";
     </script>
